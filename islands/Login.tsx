@@ -5,17 +5,19 @@ export default function LoginIsland() {
   const [password, setPassword] = useState("");
   const [isRegister, setIsRegister] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
 
   async function handleSubmit(e: Event) {
     e.preventDefault();
+    setError("");
+    setSuccess("");
 
     try {
       const res = await fetch("http://localhost:8000/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, isRegister }), // ✅ nombre corregido
+        body: JSON.stringify({ email, password, isRegister }),
       });
-
       const data = await res.json();
 
       if (!res.ok) {
@@ -24,11 +26,11 @@ export default function LoginIsland() {
       }
 
       if (!isRegister) {
-        // Login exitoso → guardar token si lo tuvieras y redirigir
-        window.location.href = "/chat"; // redirige al chatbot
+        // Guardamos token
+        localStorage.setItem("token", data.access_token);
+        window.location.href = "/chat";
       } else {
-        // Registro exitoso
-        setError("Usuario registrado correctamente. Ahora inicia sesión.");
+        setSuccess("Usuario registrado correctamente. Ahora inicia sesión.");
         setIsRegister(false);
         setPassword("");
       }
@@ -40,6 +42,7 @@ export default function LoginIsland() {
   return (
     <div class="flex flex-col items-center justify-center h-screen bg-gray-900 text-white">
       <h1 class="text-3xl mb-6">{isRegister ? "Registrarse" : "Iniciar sesión"}</h1>
+
       <form class="flex flex-col gap-4 w-80" onSubmit={handleSubmit}>
         <input
           type="email"
@@ -57,20 +60,25 @@ export default function LoginIsland() {
           required
           class="px-4 py-2 rounded bg-gray-700 text-white"
         />
+
         <button type="submit" class="px-4 py-2 bg-green-600 rounded">
           {isRegister ? "Registrarse" : "Iniciar sesión"}
         </button>
+
         <button
           type="button"
           class="mt-2 text-blue-400 underline"
           onClick={() => {
             setIsRegister(!isRegister);
             setError("");
+            setSuccess("");
           }}
         >
           {isRegister ? "Ya tengo cuenta" : "Crear cuenta nueva"}
         </button>
+
         {error && <p class="text-red-500">{error}</p>}
+        {success && <p class="text-green-500">{success}</p>}
       </form>
     </div>
   );

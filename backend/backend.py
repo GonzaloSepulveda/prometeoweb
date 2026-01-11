@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -14,16 +14,19 @@ from bson import ObjectId
 # ===============================
 # CONFIGURACIÓN
 # ===============================
-API_KEY_NINJA = "qpKu0/GWHz6p0dGkLuwIsA==TRZtzFY80QGpz6sH"
+API_KEY_NINJA = os.environ.get("API_KEY_NINJA", "TU_API_KEY")
 API_URL_NINJA = "https://api.api-ninjas.com/v1/stockprice"
 MODEL_NAME = "prometheus"
+MONGO_URI = "mongodb+srv://topgonzalosepulveda:password!@backendts.ssdd3.mongodb.net/Prometeo?retryWrites=true&w=majority"
 
 # ===============================
-# MONGO DB (Atlas)
+# MONGO DB
 # ===============================
-MONGO_URI = "mongodb+srv://topgonzalosepulveda:password!@backendts.ssdd3.mongodb.net/Prometeo?retryWrites=true&w=majority"
 client = MongoClient(MONGO_URI)
 db = client["Prometeo"]
+users_collection = db["Users"]
+conversations_collection = db["Conversations"]
+messages_collection = db["Messages"]
 
 try:
     client.admin.command('ping')
@@ -31,16 +34,10 @@ try:
 except:
     print("❌ No se pudo conectar a MongoDB")
 
-# Colecciones
-users_collection = db["Users"]
-conversations_collection = db["Conversations"]
-messages_collection = db["Messages"]
-
 # ===============================
 # FASTAPI APP
 # ===============================
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8001"],
@@ -67,6 +64,18 @@ class MessageRequest(BaseModel):
     message: str
 
 # ===============================
+# AUTENTICACIÓN SIMPLE
+# ===============================
+async def get_current_user(authorization: str = Header(...)):
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token inválido")
+    token = authorization[7:]  # quitamos "Bearer "
+    user = users_collection.find_one({"email": token})
+    if not user:
+        raise HTTPException(status_code=401, detail="Usuario no autenticado")
+    return user
+
+# ===============================
 # FUNCIONES AUXILIARES
 # ===============================
 def is_stock_symbol(text: str):
@@ -89,12 +98,8 @@ def get_stock_ninja(symbol: str):
             data = data[0]
         if "price" not in data:
             return None
-        return {
-            "ticker": data.get("ticker", symbol),
-            "price": data["price"],
-            "timestamp": "N/A"
-        }
-    except Exception:
+        return {"ticker": data.get("ticker", symbol), "price": data["price"], "timestamp": "N/A"}
+    except:
         return None
 
 def get_stock_yahoo(symbol: str):
@@ -103,12 +108,8 @@ def get_stock_yahoo(symbol: str):
         hist = ticker.history(period="5d")
         if hist.empty:
             return None
-        return {
-            "ticker": symbol,
-            "price": round(hist["Close"].iloc[-1], 4),
-            "timestamp": hist.index[-1].strftime("%Y-%m-%d %H:%M")
-        }
-    except Exception:
+        return {"ticker": symbol, "price": round(hist["Close"].iloc[-1], 4), "timestamp": hist.index[-1].strftime("%Y-%m-%d %H:%M")}
+    except:
         return None
 
 async def ask_prometheus_stream(prompt: str) -> AsyncGenerator[str, None]:
@@ -121,24 +122,18 @@ async def ask_prometheus_stream(prompt: str) -> AsyncGenerator[str, None]:
     except Exception as e:
         yield f"\n❌ Error al generar respuesta con Prometeo: {e}"
 
-async def save_message(conversation_id: str, role: str, content: str):
-    # Guardar el mensaje
+async def save_message(user_id: str, conversation_id: str, role: str, content: str):
     messages_collection.insert_one({
         "conversation_id": conversation_id,
+        "user_id": user_id,
         "role": role,
         "content": content,
         "timestamp": datetime.now()
     })
-
-    # Si es mensaje de usuario, actualizar título de conversación
     update_fields = {"updated_at": datetime.now()}
     if role == "user":
-        update_fields["title"] = content[:50]  # primeros 50 caracteres como título
-
-    conversations_collection.update_one(
-        {"_id": ObjectId(conversation_id)},
-        {"$set": update_fields}
-    )
+        update_fields["title"] = content[:50]
+    conversations_collection.update_one({"_id": ObjectId(conversation_id), "user_id": user_id}, {"$set": update_fields})
 
 # ===============================
 # LOGIN / REGISTRO
@@ -148,24 +143,23 @@ async def login_or_register(user: UserAuth):
     if user.isRegister:
         if users_collection.find_one({"email": user.email}):
             raise HTTPException(status_code=400, detail="Usuario ya existe")
-        users_collection.insert_one({
-            "email": user.email,
-            "password": user.password
-        })
+        users_collection.insert_one({"email": user.email, "password": user.password})
         return {"msg": "Usuario registrado correctamente. Ahora inicia sesión."}
     else:
         db_user = users_collection.find_one({"email": user.email})
         if not db_user or db_user["password"] != user.password:
             raise HTTPException(status_code=401, detail="Credenciales inválidas")
-        return {"msg": f"Bienvenido {user.email}", "access_token": "dummy_token"}
+        # token = email
+        return {"msg": f"Bienvenido {user.email}", "access_token": user.email}
 
 # ===============================
-# ENDPOINTS DE CONVERSACIONES
+# CONVERSACIONES
 # ===============================
 @app.post("/conversations")
-async def create_conversation(request: ConversationRequest):
+async def create_conversation(request: ConversationRequest, current_user=Depends(get_current_user)):
     conv = {
         "title": request.title or "Nueva conversación",
+        "user_id": str(current_user["_id"]),
         "created_at": datetime.now(),
         "updated_at": datetime.now()
     }
@@ -173,79 +167,49 @@ async def create_conversation(request: ConversationRequest):
     return {"conversation_id": str(result.inserted_id), "title": conv["title"]}
 
 @app.get("/conversations")
-async def list_conversations():
-    convs = conversations_collection.find().sort("updated_at", -1)
-    return [
-        {
-            "conversation_id": str(c["_id"]),
-            "title": c.get("title", "Sin título"),
-            "updated_at": c.get("updated_at")
-        } 
-        for c in convs
-    ]
+async def list_conversations(current_user=Depends(get_current_user)):
+    convs = conversations_collection.find({"user_id": str(current_user["_id"])}).sort("updated_at", -1)
+    return [{"conversation_id": str(c["_id"]), "title": c.get("title", "Sin título"), "updated_at": c.get("updated_at")} for c in convs]
 
-# ===============================
-# ELIMINAR CONVERSACIÓN
-# ===============================
 @app.delete("/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: str):
-    # Eliminamos los mensajes asociados
-    messages_collection.delete_many({"conversation_id": conversation_id})
-    # Eliminamos la conversación
-    result = conversations_collection.delete_one({"_id": ObjectId(conversation_id)})
-
+async def delete_conversation(conversation_id: str, current_user=Depends(get_current_user)):
+    messages_collection.delete_many({"conversation_id": conversation_id, "user_id": str(current_user["_id"])})
+    result = conversations_collection.delete_one({"_id": ObjectId(conversation_id), "user_id": str(current_user["_id"])})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Conversación no encontrada")
-
     return {"msg": "Conversación eliminada correctamente"}
 
-
+# ===============================
+# MENSAJES
+# ===============================
 @app.get("/conversations/{conversation_id}/messages")
-async def get_messages(conversation_id: str):
-    msgs = messages_collection.find({"conversation_id": conversation_id}).sort("timestamp", 1)
-    return [
-        {
-            "role": m.get("role"),
-            "content": m.get("content"),
-            "timestamp": m.get("timestamp")
-        }
-        for m in msgs
-    ]
+async def get_messages(conversation_id: str, current_user=Depends(get_current_user)):
+    # verificar que la conversación pertenece al usuario
+    conv = conversations_collection.find_one({"_id": ObjectId(conversation_id), "user_id": str(current_user["_id"])})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    msgs = messages_collection.find({"conversation_id": conversation_id, "user_id": str(current_user["_id"])}).sort("timestamp", 1)
+    return [{"role": m.get("role"), "content": m.get("content"), "timestamp": m.get("timestamp")} for m in msgs]
 
-# ===============================
-# CHAT CON HISTORIAL (NO STREAM)
-# ===============================
 @app.post("/chat_with_history")
-async def chat_with_history(request: MessageRequest):
+async def chat_with_history(request: MessageRequest, current_user=Depends(get_current_user)):
     user_input = request.message.strip()
     conv_id = request.conversation_id
 
-    await save_message(conv_id, "user", user_input)
+    await save_message(str(current_user["_id"]), conv_id, "user", user_input)
 
     if is_stock_symbol(user_input):
         symbol = user_input.upper()
         data = get_stock_ninja(symbol) or get_stock_yahoo(symbol)
         if not data:
             resp_text = f"No se pudieron obtener datos para {symbol}"
-            await save_message(conv_id, "assistant", resp_text)
+            await save_message(str(current_user["_id"]), conv_id, "bot", resp_text)
             return {"response": resp_text}
-        summary = f"""
-Símbolo: {data['ticker']}
-Precio actual: {data['price']}
-Última actualización: {data['timestamp']}
-"""
-        prompt = f"""
-Eres Prometeo, asistente financiero experto.
-Analiza estos datos de {symbol} y responde en español:
-
-{summary}
-"""
+        summary = f"Símbolo: {data['ticker']}\nPrecio: {data['price']}\nÚltima actualización: {data['timestamp']}"
+        prompt = f"Eres Prometeo, asistente financiero experto.\nAnaliza estos datos de {symbol} y responde en español:\n{summary}"
     else:
-        prompt = f"""
-Eres Prometeo, asistente financiero experto.
-El usuario preguntó: "{user_input}"
-Responde en español.
-"""
+        prompt = f"Eres Prometeo, asistente financiero experto.\nEl usuario preguntó: '{user_input}'\nResponde en español."
+
     response = ""
     try:
         for chunk in ollama.generate(model=MODEL_NAME, prompt=prompt, stream=True):
@@ -256,18 +220,14 @@ Responde en español.
     except:
         response = "❌ Error al generar respuesta con Prometeo"
 
-    await save_message(conv_id, "assistant", response)
+    await save_message(str(current_user["_id"]), conv_id, "bot", response)
     return {"response": response}
 
-# ===============================
-# CHAT CON HISTORIAL (STREAMING)
-# ===============================
 @app.post("/chat_with_history/stream")
-async def chat_stream_with_history(request: MessageRequest):
+async def chat_stream_with_history(request: MessageRequest, current_user=Depends(get_current_user)):
     user_input = request.message.strip()
     conv_id = request.conversation_id
-
-    await save_message(conv_id, "user", user_input)
+    await save_message(str(current_user["_id"]), conv_id, "user", user_input)
 
     if is_stock_symbol(user_input):
         symbol = user_input.upper()
@@ -276,23 +236,10 @@ async def chat_stream_with_history(request: MessageRequest):
             async def error_gen():
                 yield f"No se pudieron obtener datos para {symbol}"
             return StreamingResponse(error_gen(), media_type="text/plain")
-        summary = f"""
-Símbolo: {data['ticker']}
-Precio actual: {data['price']}
-Última actualización: {data['timestamp']}
-"""
-        prompt = f"""
-Eres Prometeo, asistente financiero experto.
-Analiza estos datos de {symbol} y responde en español:
-
-{summary}
-"""
+        summary = f"Símbolo: {data['ticker']}\nPrecio: {data['price']}\nÚltima actualización: {data['timestamp']}"
+        prompt = f"Eres Prometeo, asistente financiero experto.\nAnaliza estos datos de {symbol} y responde en español:\n{summary}"
     else:
-        prompt = f"""
-Eres Prometeo, asistente financiero experto.
-El usuario preguntó: "{user_input}"
-Responde en español.
-"""
+        prompt = f"Eres Prometeo, asistente financiero experto.\nEl usuario preguntó: '{user_input}'\nResponde en español."
 
     async def generator():
         accumulated_text = ""
@@ -300,11 +247,10 @@ Responde en español.
             async for token in ask_prometheus_stream(prompt):
                 accumulated_text += token
                 yield token
-            # Guardamos **todo el texto acumulado**
-            await save_message(conv_id, "assistant", accumulated_text)
+            await save_message(str(current_user["_id"]), conv_id, "bot", accumulated_text)
         except Exception as e:
             error_msg = f"\n❌ Error al generar respuesta con Prometeo: {e}"
-            await save_message(conv_id, "assistant", error_msg)
+            await save_message(str(current_user["_id"]), conv_id, "bot", error_msg)
             yield error_msg
 
     return StreamingResponse(generator(), media_type="text/plain")
