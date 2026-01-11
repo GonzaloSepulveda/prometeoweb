@@ -19,3 +19,5 @@ deno task start
 Si da error ps1 
 
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+deactivace para salir del venv
