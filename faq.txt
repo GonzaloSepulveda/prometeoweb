@@ -1,14 +1,15 @@
 En la carpeta backend 
 cd "C:\Users\Gonzalo\Desktop\MemoriasPracticas\MemoriasUno\CodePrometeo\prometeoweb\backend"
 
+Levantar el backend
+uvicorn backend:app --reload --host 0.0.0.0 --port 8000
 Si se queja de entorno virtual
 
 python -m venv venv
 
 venv\Scripts\activate
 
-Levantar el backend
-uvicorn backend:app --reload --host 0.0.0.0 --port 8000
+
 
 
 En la carpeta prometeoweb
